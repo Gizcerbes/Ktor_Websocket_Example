@@ -27,8 +27,16 @@ suspend fun main() {
     val job = CoroutineScope(Dispatchers.IO).launch {
         open(client, "first")
     }
+    val jobClause2 = CoroutineScope(Dispatchers.IO).launch {
+        open(client, "second")
+    }
+    val jobClause3 = CoroutineScope(Dispatchers.IO).launch {
+        open(client, "third")
+    }
 
     job.join()
+    jobClause3.join()
+    jobClause2.join()
 
     client.close()
 }
@@ -69,10 +77,11 @@ private suspend fun open(client: HttpClient, text: String) {
 
     stream.connectWhile { keep }
 
-    repeat(10000) { i ->
+    repeat(10) { i ->
         stream.send(Output("$text $i")) {
             println("$it $i")
         }.join()
+        delay(100)
     }
     keep = false
     delay(100)

@@ -39,23 +39,7 @@ fun Application.configureSocket() {
         masking = true
     }
 
-    val exceptionHandler = CoroutineExceptionHandler { _, exception ->
-        when (exception) {
-            is java.net.SocketException -> {
-                if (exception.message == "Connection reset") {
-                    println("Connection reset by peer: ${exception.message}")
-                } else {
-                    println("Socket error: ${exception.message}")
-                }
-            }
-
-            else -> println("Unhandled exception: ${exception.message}")
-        }
-    }
-
-
     routing {
-
 
         val list = ArrayList<WebSocketSession>()
         val messageResponseFlow = MutableSharedFlow<MessageResponse>()
@@ -87,13 +71,7 @@ fun Application.configureSocket() {
                         when (frame) {
                             is Frame.Text -> {
                                 val data = frame.data
-                               // println(data.decodeToString())
                                 dataFlow.emit(data)
-                                //delay(100)
-                               // val receivedText = frame.readText()
-                                //println(receivedText)
-                                //val messageResponse = MessageResponse(receivedText)
-                                //messageResponseFlow.emit(messageResponse)
                             }
 
                             else -> {
