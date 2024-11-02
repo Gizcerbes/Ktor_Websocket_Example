@@ -33,8 +33,8 @@ fun main() {
 fun Application.configureSocket() {
 
     install(WebSockets) {
-        pingPeriod = Duration.parse("15s")
-        timeout = Duration.parse("15s")
+        pingPeriod = Duration.parse("1s")
+        timeout = Duration.parse("10s")
         maxFrameSize = Long.MAX_VALUE
         masking = true
     }
@@ -63,9 +63,17 @@ fun Application.configureSocket() {
 
         sharedFlow.onEach { message ->
             list.forEach {
-                runCatching { it.send(message.message) }
-                    .onFailure { println("Catch error") }
+                runCatching {
+                    println(message.message)
+                    if (it.isActive) it.send(message.message)
+                }.onFailure { println("Catch error $it") }
             }
+        }.launchIn(CoroutineScope(Dispatchers.IO))
+
+        val dataFlow = MutableSharedFlow<ByteArray>(extraBufferCapacity = 256)
+
+        dataFlow.onEach { data ->
+            messageResponseFlow.emit(MessageResponse(data.decodeToString()))
         }.launchIn(CoroutineScope(Dispatchers.IO))
 
         webSocket("/ws") {
@@ -78,21 +86,26 @@ fun Application.configureSocket() {
                     incoming.consumeEach { frame ->
                         when (frame) {
                             is Frame.Text -> {
-                                val receivedText = frame.readText()
-                                println(receivedText)
-                                val messageResponse = MessageResponse(receivedText)
-                                messageResponseFlow.emit(messageResponse)
+                                val data = frame.data
+                               // println(data.decodeToString())
+                                dataFlow.emit(data)
+                                //delay(100)
+                               // val receivedText = frame.readText()
+                                //println(receivedText)
+                                //val messageResponse = MessageResponse(receivedText)
+                                //messageResponseFlow.emit(messageResponse)
                             }
+
                             else -> {
                                 println("else")
                             }
                         }
                     }
                 }.onFailure { exception ->
+                    exception.printStackTrace()
                     println("WebSocket exception: ${exception.localizedMessage}")
                 }
 
-                list.remove(this)
 
                 println("canceling")
                 close(CloseReason(CloseReason.Codes.NORMAL, "leave"))
@@ -103,6 +116,9 @@ fun Application.configureSocket() {
                 println("onError ${closeReason.await()}")
                 e.printStackTrace()
             }
+
+            list.remove(this)
+
         }
     }
 }

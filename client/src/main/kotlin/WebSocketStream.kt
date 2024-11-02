@@ -11,6 +11,7 @@ import kotlinx.serialization.encodeToString
 import kotlinx.serialization.json.Json
 
 
+@OptIn(DelicateCoroutinesApi::class)
 abstract class WebSocketStream<I : Any, O>(
     private val client: HttpClient,
     private val workScope: CoroutineScope,
@@ -64,20 +65,51 @@ abstract class WebSocketStream<I : Any, O>(
         data class Error(val e: Throwable) : SendStatus
     }
 
-    private data class Input(
-        val data: String,
+    private data class Input<T>(
+        val data: T,
         val statusReceiver: (SendStatus) -> Unit
     )
 
     private val _stream = MutableSharedFlow<Output<I>>()
     val output = _stream.asSharedFlow()
 
-    private val input = Channel<Input>()
 
     private val _status = MutableStateFlow<Status>(Status.Disconnect)
     val status = _status.asStateFlow()
 
     private var job: Job? = null
+    private var socket: DefaultWebSocketSession? = null
+
+    private val input = Channel<Input<String>>()
+    private val dataInput = Channel<Input<ByteArray>>()
+
+    init {
+        workScope.launch {
+            input.consumeEach { income ->
+                runCatching {
+                    while (socket?.outgoing?.isClosedForSend != false) delay(100)
+                    socket?.send(Frame.Text(income.data))
+                        ?: throw CancellationException("Channel wasn't opened")
+                    workScope.launch { income.statusReceiver(SendStatus.OK) }
+                }.onFailure {
+                    workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                }
+            }
+        }
+        workScope.launch {
+            dataInput.consumeEach { income ->
+                runCatching {
+                    while (socket?.outgoing?.isClosedForSend != false) delay(100)
+                    socket?.send(Frame.Binary(fin = true, data = income.data))
+                        ?: throw CancellationException("Channel wasn't opened")
+                    workScope.launch { income.statusReceiver(SendStatus.OK) }
+                }.onFailure {
+                    workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                }
+            }
+        }
+
+    }
 
 
     fun connectWhile(
@@ -98,11 +130,11 @@ abstract class WebSocketStream<I : Any, O>(
         }
     }
 
+    @OptIn(DelicateCoroutinesApi::class)
     private suspend fun connectSuspend(keepOpen: () -> Boolean) {
         client.webSocket(urlString) {
-
+            socket = this
             val connectJob = launch {
-
                 incoming.receiveAsFlow()
                     .onStart {
                         _status.value = Status.Connected
@@ -131,27 +163,15 @@ abstract class WebSocketStream<I : Any, O>(
                             }
                         }
                     }.launchIn(this)
-
-                launch {
-                    input.consumeEach { income ->
-                        runCatching {
-                            send(Frame.Text(income.data))
-                            workScope.launch { income.statusReceiver(SendStatus.OK) }
-                        }.onFailure {
-                            workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
-                        }
-                    }
-                }
-
-
             }
 
-            while (keepOpen()) delay(1000)
+            while (keepOpen() && !incoming.isClosedForReceive) delay(10)
 
             _status.value = Status.Disconnect
             connectJob.cancel()
             send(Frame.Close())
             close(reason = CloseReason(CloseReason.Codes.NORMAL, "leave"))
+            socket = null
         }
 
     }
@@ -161,6 +181,13 @@ abstract class WebSocketStream<I : Any, O>(
         statusHandler: (SendStatus) -> Unit = {}
     ) = workScope.launch {
         input.send(Input(encoder(obj), statusHandler))
+    }
+
+    fun send(
+        byteArray: ByteArray,
+        statusHandler: (SendStatus) -> Unit = {}
+    ) = workScope.launch {
+        dataInput.send(Input(byteArray, statusHandler))
     }
 
 }
