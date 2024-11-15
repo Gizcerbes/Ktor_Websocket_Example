@@ -2,6 +2,7 @@ package org.example
 
 import io.ktor.client.*
 import io.ktor.client.plugins.websocket.*
+import io.ktor.client.request.HttpRequestBuilder
 import io.ktor.websocket.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.channels.Channel
@@ -18,6 +19,7 @@ abstract class WebSocketStream<I : Any, O>(
     private val urlString: String,
     val encoder: (O) -> String,
     private val decoder: (String) -> I,
+    private val request: HttpRequestBuilder.() -> Unit = {}
 ) {
 
     companion object {
@@ -27,14 +29,16 @@ abstract class WebSocketStream<I : Any, O>(
             workScope: CoroutineScope,
             urlString: String,
             noinline encoder: (O) -> String = { defaultSerializer.encodeToString(it) },
-            noinline decoder: (String) -> I = { defaultSerializer.decodeFromString(it) }
+            noinline decoder: (String) -> I = { defaultSerializer.decodeFromString(it) },
+            noinline request: HttpRequestBuilder.() -> Unit = {}
         ): WebSocketStream<I, O> {
             return object : WebSocketStream<I, O>(
                 client = client,
                 workScope = workScope,
                 urlString = urlString,
                 encoder = encoder,
-                decoder = decoder
+                decoder = decoder,
+                request = request
             ) {}
         }
 
@@ -67,7 +71,8 @@ abstract class WebSocketStream<I : Any, O>(
 
     private data class Input<T>(
         val data: T,
-        val statusReceiver: (SendStatus) -> Unit
+        val statusReceiver: (SendStatus) -> Unit,
+        val retry: Int = 1
     )
 
     private val _stream = MutableSharedFlow<Output<I>>()
@@ -86,25 +91,35 @@ abstract class WebSocketStream<I : Any, O>(
     init {
         workScope.launch {
             input.consumeEach { income ->
-                runCatching {
-                    while (socket?.outgoing?.isClosedForSend != false) delay(100)
-                    socket?.send(Frame.Text(income.data))
-                        ?: throw CancellationException("Channel wasn't opened")
-                    workScope.launch { income.statusReceiver(SendStatus.OK) }
-                }.onFailure {
-                    workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                var retries = 0
+                while (retries < income.retry) {
+                    runCatching {
+                        while (socket?.outgoing?.isClosedForSend != false) delay(100)
+                        socket?.send(Frame.Text(income.data))
+                            ?: throw CancellationException("Channel wasn't opened")
+                        workScope.launch { income.statusReceiver(SendStatus.OK) }
+                        return@consumeEach
+                    }.onFailure {
+                        retries++
+                        workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                    }
                 }
             }
         }
         workScope.launch {
             dataInput.consumeEach { income ->
-                runCatching {
-                    while (socket?.outgoing?.isClosedForSend != false) delay(100)
-                    socket?.send(Frame.Binary(fin = true, data = income.data))
-                        ?: throw CancellationException("Channel wasn't opened")
-                    workScope.launch { income.statusReceiver(SendStatus.OK) }
-                }.onFailure {
-                    workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                var retries = 0
+                while (retries < income.retry) {
+                    runCatching {
+                        while (socket?.outgoing?.isClosedForSend != false) delay(100)
+                        socket?.send(Frame.Binary(fin = true, data = income.data))
+                            ?: throw CancellationException("Channel wasn't opened")
+                        workScope.launch { income.statusReceiver(SendStatus.OK) }
+                        return@consumeEach
+                    }.onFailure {
+                        retries++
+                        workScope.launch { income.statusReceiver(SendStatus.Error(it)) }
+                    }
                 }
             }
         }
@@ -132,7 +147,10 @@ abstract class WebSocketStream<I : Any, O>(
 
     @OptIn(DelicateCoroutinesApi::class)
     private suspend fun connectSuspend(keepOpen: () -> Boolean) {
-        client.webSocket(urlString) {
+        client.webSocket(
+            urlString = urlString,
+           // request = request
+        ) {
             socket = this
             val connectJob = launch {
                 incoming.receiveAsFlow()
@@ -178,16 +196,18 @@ abstract class WebSocketStream<I : Any, O>(
 
     fun send(
         obj: O,
+        retries: Int = 1,
         statusHandler: (SendStatus) -> Unit = {}
     ) = workScope.launch {
-        input.send(Input(encoder(obj), statusHandler))
+        input.send(Input(encoder(obj), statusHandler, retries))
     }
 
     fun send(
         byteArray: ByteArray,
+        retries: Int = 1,
         statusHandler: (SendStatus) -> Unit = {}
     ) = workScope.launch {
-        dataInput.send(Input(byteArray, statusHandler))
+        dataInput.send(Input(byteArray, statusHandler, retries))
     }
 
 }
